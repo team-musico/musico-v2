@@ -11,8 +11,14 @@ type Candidate = {
   thumbnail?: string;
   duration?: string;
 };
+type SearchSuccess = {
+  track: Track;
+  candidates: SearchResponse["candidates"];
+};
 
 let youtubePromise: Promise<Innertube> | null = null;
+const responseCache = new Map<string, SearchSuccess>();
+const embeddableCache = new Map<string, Promise<boolean>>();
 
 function getYoutube() {
   youtubePromise ??= Innertube.create({
@@ -21,6 +27,10 @@ function getYoutube() {
   });
 
   return youtubePromise;
+}
+
+function createCacheKey(artist: string, title: string) {
+  return `${normalize(artist)}::${normalize(title)}`;
 }
 
 function normalize(value: string) {
@@ -69,19 +79,37 @@ function mapCandidate(value: unknown): Candidate | null {
   return { videoId, title, thumbnail, duration };
 }
 
-async function isEmbeddable(videoId: string) {
+async function fetchEmbeddable(videoId: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_500);
+
   try {
     const response = await fetch(
       `https://www.youtube.com/oembed?url=${encodeURIComponent(
         `https://www.youtube.com/watch?v=${videoId}`,
       )}&format=json`,
-      { cache: "no-store" },
+      {
+        next: { revalidate: 60 * 60 * 24 * 7 },
+        signal: controller.signal,
+      },
     );
 
     return response.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+function isEmbeddable(videoId: string) {
+  const cached = embeddableCache.get(videoId);
+  if (cached) return cached;
+
+  const promise = fetchEmbeddable(videoId);
+  embeddableCache.set(videoId, promise);
+
+  return promise;
 }
 
 export async function POST(request: NextRequest) {
@@ -100,6 +128,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const cacheKey = createCacheKey(artist, title);
+  const cached = responseCache.get(cacheKey);
+  if (cached) return NextResponse.json(cached);
+
   const query = `${artist} ${title} lyrics`;
   const youtube = await getYoutube();
   const results = await youtube.search(query, { type: "video" });
@@ -108,25 +140,43 @@ export async function POST(request: NextRequest) {
 
   const normalizedArtist = normalize(artist);
   const normalizedTitle = normalize(title);
-  const inspected: SearchResponse["candidates"] = [];
-
-  for (const candidate of candidates.slice(0, 12)) {
+  const inspected = candidates.slice(0, 12).map((candidate) => {
     const normalizedCandidateTitle = normalize(candidate.title);
     const matchedArtist = normalizedCandidateTitle.includes(normalizedArtist);
     const matchedTitle = normalizedCandidateTitle.includes(normalizedTitle);
-    const embeddable = matchedArtist && matchedTitle
-      ? await isEmbeddable(candidate.videoId)
-      : false;
 
-    inspected.push({
+    return {
       videoId: candidate.videoId,
       title: candidate.title,
       matchedArtist,
       matchedTitle,
-      embeddable,
-    });
+      embeddable: false,
+    };
+  }) satisfies SearchResponse["candidates"];
 
-    if (matchedArtist && matchedTitle && embeddable) {
+  const embeddableResults = await Promise.all(
+    inspected.map((candidate) =>
+      candidate.matchedArtist && candidate.matchedTitle
+        ? isEmbeddable(candidate.videoId)
+        : Promise.resolve(false),
+    ),
+  );
+
+  const verifiedCandidates = inspected.map((candidate, index) => ({
+    ...candidate,
+    embeddable: embeddableResults[index] ?? false,
+  })) satisfies SearchResponse["candidates"];
+
+  for (const candidate of candidates.slice(0, 12)) {
+    const inspectedCandidate = verifiedCandidates.find(
+      (item) => item.videoId === candidate.videoId,
+    );
+
+    if (
+      inspectedCandidate?.matchedArtist &&
+      inspectedCandidate.matchedTitle &&
+      inspectedCandidate.embeddable
+    ) {
       const track: Track = {
         id: crypto.randomUUID(),
         videoId: candidate.videoId,
@@ -139,7 +189,10 @@ export async function POST(request: NextRequest) {
         url: `https://www.youtube.com/watch?v=${candidate.videoId}`,
       };
 
-      return NextResponse.json({ track, candidates: inspected });
+      const payload = { track, candidates: verifiedCandidates };
+      responseCache.set(cacheKey, payload);
+
+      return NextResponse.json(payload);
     }
   }
 
@@ -147,7 +200,7 @@ export async function POST(request: NextRequest) {
     {
       error:
         "재생 가능 여부와 제목 검증을 모두 통과한 음원을 찾지 못했습니다.",
-      candidates: inspected,
+      candidates: verifiedCandidates,
     },
     { status: 404 },
   );

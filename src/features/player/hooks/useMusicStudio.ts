@@ -38,6 +38,7 @@ export const useMusicStudio = () => {
   const pathname = usePathname();
   const playerRef = useRef<PlayerRef | null>(null);
   const playbackRequestIdRef = useRef(0);
+  const playableTrackCacheRef = useRef<Map<string, Track>>(new Map());
   const [mounted, setMounted] = useState(false);
   const [locale, setLocale] = useState<Locale>("ko");
   const [queue, setQueue] = useState<Track[]>([]);
@@ -205,7 +206,14 @@ export const useMusicStudio = () => {
     if (startPlayback) setPlaybackIntentPlaying(true);
   };
 
+  const createPlayableTrackCacheKey = (selectedArtist: string, selectedTitle: string) =>
+    `${selectedArtist.toLowerCase().trim()}::${selectedTitle.toLowerCase().trim()}`;
+
   const fetchPlayableTrack = async (selectedArtist: string, selectedTitle: string, source?: VibeTrack) => {
+    const cacheKey = createPlayableTrackCacheKey(selectedArtist, selectedTitle);
+    const cachedTrack = playableTrackCacheRef.current.get(cacheKey);
+    if (cachedTrack) return cachedTrack;
+
     const { response, payload } = await playerApi.resolvePlayableTrack(selectedArtist, selectedTitle);
 
     if (!response.ok || !("track" in payload)) {
@@ -213,13 +221,16 @@ export const useMusicStudio = () => {
       throw new Error(message ?? "재생 가능한 음원을 찾지 못했습니다.");
     }
 
-    return {
+    const playableTrack = {
       ...payload.track,
       artist: source ? selectedArtist : payload.track.artist,
       title: source ? source.title : payload.track.title,
       coverUrl: source?.albumArt,
       trackId: source?.trackId,
     } satisfies Track;
+    playableTrackCacheRef.current.set(cacheKey, playableTrack);
+
+    return playableTrack;
   };
 
   const playVibeTrack = async (track: VibeTrack) => {
