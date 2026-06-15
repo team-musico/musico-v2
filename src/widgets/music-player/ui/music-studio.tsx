@@ -204,7 +204,7 @@ const MusicStudio = ({ children }: { children?: ReactNode }) => {
                     </nav>
 
                     {error ? (
-                      <div className="mb-4 rounded-md border border-red-400/20 bg-red-500/10 p-3 text-sm font-semibold text-red-100">
+                      <div className="mb-4 rounded-md border border-mp3-warning-text bg-mp3-warning-bg p-3 text-sm font-bold text-mp3-warning-text shadow-sm">
                         {error}
                       </div>
                     ) : null}
